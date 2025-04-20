@@ -49,8 +49,9 @@ func runGitRevParse(repoPath string, revision string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		// Check if it's just that the ref doesn't exist yet (e.g., initial commit)
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			// stderrContent := string(exitErr.Stderr)
+		// Use '_' to explicitly ignore the exitErr variable if not used
+		if _, ok := err.(*exec.ExitError); ok {
+			// stderrContent := string(exitErr.Stderr) // If you needed stderr, use exitErr here
 			// Check stderr or exit code if needed to differentiate errors
 			return "", fmt.Errorf("git rev-parse %s failed: %w", revision, err)
 		}
