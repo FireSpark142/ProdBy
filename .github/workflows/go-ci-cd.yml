@@ -9,6 +9,8 @@ on:
 
 permissions:
   contents: write # Needed to write Releases
+  pull-requests: read # Needed for govulncheck-action potentially on PRs
+  checks: write # Needed for govulncheck-action potentially
 
 jobs:
   validate:
@@ -32,7 +34,10 @@ jobs:
         # Optional: check if go.mod/go.sum changed and fail if so
         # run: |
         #   go mod tidy
-        #   git diff --exit-code -- go.mod go.sum
+        #   if ! git diff --exit-code -- go.mod go.sum; then
+        #     echo "::error::go.mod/go.sum are outdated, run 'go mod tidy' locally and commit"
+        #     exit 1
+        #   fi
 
       # Optional: Add Linting (Example using golangci-lint)
       # - name: Run golangci-lint
@@ -45,9 +50,12 @@ jobs:
       # - name: Run tests
       #   run: go test -v ./...
 
+      # --- CORRECTED GOVULNCHECK STEP ---
       - name: Run govulncheck
-        # Run vulncheck AFTER go mod tidy/download
-        run: govulncheck ./...
+        # Use the dedicated action which handles installation
+        uses: golang/govulncheck-action@v1
+        # Action defaults to checking ./... using the Go version set up previously
+      # --- END CORRECTED STEP ---
 
 
   build_binaries:
@@ -130,9 +138,7 @@ jobs:
               ARCHIVE_PATH="../${ARTIFACT_NAME}.tar.gz"
               echo "Created ${ARCHIVE_PATH}"
             else
-              echo "No files found in dist/ to archive."
-              # Decide how to handle - fail or just output empty path?
-              # Let's output empty path for now, upload might fail later if needed
+              echo "::warning::No files found in dist/ to archive for ${{ matrix.name }}."
               ARCHIVE_PATH="" # Set empty path explicitly
             fi
           fi
@@ -168,7 +174,7 @@ jobs:
           find ./artifacts -type f # List all files found
 
       - name: Create GitHub Release and Upload Assets
-        uses: softprops/action-gh-release@v2 # v2 supports directory uploads better
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
