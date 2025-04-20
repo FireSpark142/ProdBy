@@ -1,0 +1,156 @@
+name: Go CI/CD Pipeline
+
+# Controls when the workflow will run
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*' ] # Run on version tags like v1.0.0
+  pull_request:
+    branches: [ main ]
+
+permissions: # Needed for release creation and asset upload
+  contents: write
+  # id-token: write # Might be needed for future OIDC integration if used
+
+jobs:
+  # Job to run linters, tests, and security checks
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod' # Read Go version from go.mod
+          cache: true # Enable dependency caching
+
+      # Optional: Add Linting (Example using golangci-lint)
+      # - name: Run golangci-lint
+      #   uses: golangci/golangci-lint-action@v6
+      #   with:
+      #     version: latest # Or pin to a specific version
+      #     args: --timeout=5m
+
+      # Optional: Add Tests (Uncomment if you have tests)
+      # - name: Run tests
+      #   run: go test -v ./...
+
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+            go-version-file: 'go.mod'
+
+  # Job to build binaries and create a GitHub Release
+  release:
+    # Only run this job on tag pushes
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: validate # Run only if the validate job succeeds
+    runs-on: ubuntu-latest # Use ubuntu to orchestrate release creation
+
+    strategy:
+      matrix:
+        # Define build targets
+        # Include more os/arch combinations as needed
+        include:
+          - os: linux
+            arch: amd64
+            goos: linux
+            goarch: amd64
+          - os: linux
+            arch: arm64
+            goos: linux
+            goarch: arm64
+          - os: darwin # macOS
+            arch: amd64
+            goos: darwin
+            goarch: amd64
+          - os: darwin # macOS
+            arch: arm64
+            goos: darwin
+            goarch: arm64
+          - os: windows
+            arch: amd64
+            goos: windows
+            goarch: amd64
+            ext: .exe # Executable extension for Windows
+          # - os: windows
+          #   arch: arm64
+          #   goos: windows
+          #   goarch: arm64
+          #   ext: .exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build application for ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0 # Disable CGO for better cross-compilation, unless needed
+          # Use matrix.ext which is defined only for windows targets
+          BINARY_NAME: git-monitor-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+        run: |
+          echo "Building for $GOOS/$GOARCH..."
+          go build -v -trimpath -ldflags="-s -w" -o "dist/$BINARY_NAME" .
+          echo "Built: dist/$BINARY_NAME"
+
+      - name: Create Archive for ${{ matrix.goos }}/${{ matrix.goarch }}
+        shell: bash # Use bash for consistent archiving commands
+        run: |
+          ARTIFACT_NAME="git-monitor-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}"
+          cd dist # Go into the directory where the binary is
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            7z a "../${ARTIFACT_NAME}.zip" * # Use 7z (pre-installed on runners) for zip
+            echo "ARCHIVE_NAME=${ARTIFACT_NAME}.zip" >> $GITHUB_ENV
+            echo "Created ../${ARTIFACT_NAME}.zip"
+          else
+            tar czvf "../${ARTIFACT_NAME}.tar.gz" * # Use tar for .tar.gz
+            echo "ARCHIVE_NAME=${ARTIFACT_NAME}.tar.gz" >> $GITHUB_ENV
+            echo "Created ../${ARTIFACT_NAME}.tar.gz"
+          fi
+          cd .. # Go back to the root
+
+      - name: Upload Release Asset (${{ matrix.os }}/${{ matrix.arch }})
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create_release.outputs.upload_url }} # Gets URL from the release job below
+          asset_path: ./${{ env.ARCHIVE_NAME }}
+          asset_name: ${{ env.ARCHIVE_NAME }}
+          asset_content_type: application/octet-stream
+
+  # Separate step to create the release itself ONCE.
+  # The matrix build jobs upload assets TO this release.
+  create_release:
+    # Only run this job on tag pushes
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: validate # Depend only on validation passing; build jobs run in parallel
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }} # Output URL for other jobs
+    steps:
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          body: |
+            Automated release for version ${{ github.ref_name }}
+
+            **Binaries:**
+            (Attached below)
+          draft: false
+          prerelease: false # Set to true if you want pre-releases based on tag format (e.g., v1.0.0-rc1)
