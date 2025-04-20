@@ -1,6 +1,5 @@
 name: Go CI/CD Pipeline
 
-# Controls when the workflow will run
 on:
   push:
     branches: [ main ]
@@ -8,13 +7,12 @@ on:
   pull_request:
     branches: [ main ]
 
-permissions: # Needed for release creation and asset upload
-  contents: write
-  # id-token: write # Might be needed for future OIDC integration if used
+permissions:
+  contents: write # Needed to write Releases
 
 jobs:
-  # Job to run linters, tests, and security checks
   validate:
+    name: Validate Code
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -23,14 +21,24 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod' # Read Go version from go.mod
-          cache: true # Enable dependency caching
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod tidy
+        # Optional: check if go.mod/go.sum changed and fail if so
+        # run: |
+        #   go mod tidy
+        #   git diff --exit-code -- go.mod go.sum
 
       # Optional: Add Linting (Example using golangci-lint)
       # - name: Run golangci-lint
       #   uses: golangci/golangci-lint-action@v6
       #   with:
-      #     version: latest # Or pin to a specific version
+      #     version: latest
       #     args: --timeout=5m
 
       # Optional: Add Tests (Uncomment if you have tests)
@@ -38,48 +46,42 @@ jobs:
       #   run: go test -v ./...
 
       - name: Run govulncheck
-        uses: golang/govulncheck-action@v1
-        with:
-            go-version-file: 'go.mod'
+        # Run vulncheck AFTER go mod tidy/download
+        run: govulncheck ./...
 
-  # Job to build binaries and create a GitHub Release
-  release:
+
+  build_binaries:
+    name: Build Binaries
     # Only run this job on tag pushes
     if: startsWith(github.ref, 'refs/tags/v')
     needs: validate # Run only if the validate job succeeds
-    runs-on: ubuntu-latest # Use ubuntu to orchestrate release creation
-
+    runs-on: ${{ matrix.os }} # Run builds on the target OS
     strategy:
+      fail-fast: false # Prevent cancelling all matrix jobs if one fails
       matrix:
-        # Define build targets
-        # Include more os/arch combinations as needed
         include:
-          - os: linux
-            arch: amd64
+          - name: linux-amd64
+            os: ubuntu-latest
             goos: linux
             goarch: amd64
-          - os: linux
-            arch: arm64
+          - name: linux-arm64
+            os: ubuntu-latest
             goos: linux
             goarch: arm64
-          - os: darwin # macOS
-            arch: amd64
+          - name: darwin-amd64 # macOS
+            os: macos-latest
             goos: darwin
             goarch: amd64
-          - os: darwin # macOS
-            arch: arm64
+          - name: darwin-arm64 # macOS
+            os: macos-latest
             goos: darwin
             goarch: arm64
-          - os: windows
-            arch: amd64
+          - name: windows-amd64
+            os: windows-latest
             goos: windows
             goarch: amd64
-            ext: .exe # Executable extension for Windows
-          # - os: windows
-          #   arch: arm64
-          #   goos: windows
-          #   goarch: arm64
-          #   ext: .exe
+            ext: .exe
+            # Add other os/arch if needed
 
     steps:
       - name: Checkout code
@@ -91,57 +93,82 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Build application for ${{ matrix.goos }}/${{ matrix.goarch }}
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod tidy
+
+      - name: Build application (${{ matrix.name }})
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0 # Disable CGO for better cross-compilation, unless needed
-          # Use matrix.ext which is defined only for windows targets
-          BINARY_NAME: git-monitor-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          CGO_ENABLED: 0
+          BINARY_NAME: git-monitor-${{ matrix.name }}${{ matrix.ext }}
         run: |
           echo "Building for $GOOS/$GOARCH..."
+          mkdir -p dist # Ensure dist directory exists
           go build -v -trimpath -ldflags="-s -w" -o "dist/$BINARY_NAME" .
           echo "Built: dist/$BINARY_NAME"
 
-      - name: Create Archive for ${{ matrix.goos }}/${{ matrix.goarch }}
-        shell: bash # Use bash for consistent archiving commands
+      - name: Create Archive (${{ matrix.name }})
+        id: archive # Give this step an ID
+        shell: bash # Use bash for consistency across runners for this step
         run: |
-          ARTIFACT_NAME="git-monitor-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}"
+          ARTIFACT_NAME="git-monitor-${{ github.ref_name }}-${{ matrix.name }}"
+          ARCHIVE_PATH="" # Initialize variable
           cd dist # Go into the directory where the binary is
+          ls -la # List files to be archived (for debugging)
           if [[ "${{ matrix.goos }}" == "windows" ]]; then
-            7z a "../${ARTIFACT_NAME}.zip" * # Use 7z (pre-installed on runners) for zip
-            echo "ARCHIVE_NAME=${ARTIFACT_NAME}.zip" >> $GITHUB_ENV
-            echo "Created ../${ARTIFACT_NAME}.zip"
+            7z a "../${ARTIFACT_NAME}.zip" * # Use 7z (pre-installed) for zip
+            ARCHIVE_PATH="../${ARTIFACT_NAME}.zip"
+            echo "Created ${ARCHIVE_PATH}"
           else
-            tar czvf "../${ARTIFACT_NAME}.tar.gz" * # Use tar for .tar.gz
-            echo "ARCHIVE_NAME=${ARTIFACT_NAME}.tar.gz" >> $GITHUB_ENV
-            echo "Created ../${ARTIFACT_NAME}.tar.gz"
+            # Handle case where '*' might match nothing if build failed
+            if [ -n "$(ls -A)" ]; then
+              tar czvf "../${ARTIFACT_NAME}.tar.gz" * # Use tar for .tar.gz
+              ARCHIVE_PATH="../${ARTIFACT_NAME}.tar.gz"
+              echo "Created ${ARCHIVE_PATH}"
+            else
+              echo "No files found in dist/ to archive."
+              # Decide how to handle - fail or just output empty path?
+              # Let's output empty path for now, upload might fail later if needed
+              ARCHIVE_PATH="" # Set empty path explicitly
+            fi
           fi
           cd .. # Go back to the root
+          # Set output for artifact upload step
+          echo "archive_path=${ARCHIVE_PATH}" >> $GITHUB_OUTPUT
 
-      - name: Upload Release Asset (${{ matrix.os }}/${{ matrix.arch }})
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload build artifact (${{ matrix.name }})
+        # Only run if archive_path is not empty
+        if: steps.archive.outputs.archive_path != ''
+        uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ needs.create_release.outputs.upload_url }} # Gets URL from the release job below
-          asset_path: ./${{ env.ARCHIVE_NAME }}
-          asset_name: ${{ env.ARCHIVE_NAME }}
-          asset_content_type: application/octet-stream
+          name: git-monitor-binaries-${{ matrix.name }} # Unique artifact name per build
+          path: ${{ steps.archive.outputs.archive_path }}
+          retention-days: 5 # Keep artifacts for 5 days
 
-  # Separate step to create the release itself ONCE.
-  # The matrix build jobs upload assets TO this release.
-  create_release:
+
+  create_upload_release:
+    name: Create GitHub Release
     # Only run this job on tag pushes
     if: startsWith(github.ref, 'refs/tags/v')
+    needs: build_binaries # Run after all matrix builds are done
     runs-on: ubuntu-latest
-    needs: validate # Depend only on validation passing; build jobs run in parallel
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }} # Output URL for other jobs
     steps:
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts # Download to ./artifacts directory (creates subdirs per artifact)
+
+      - name: List downloaded artifacts (for debugging)
+        run: |
+          echo "Listing downloaded artifacts..."
+          find ./artifacts -type f # List all files found
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2 # v2 supports directory uploads better
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -153,4 +180,7 @@ jobs:
             **Binaries:**
             (Attached below)
           draft: false
-          prerelease: false # Set to true if you want pre-releases based on tag format (e.g., v1.0.0-rc1)
+          prerelease: false
+          # This pattern uploads all files within the subdirectories created by download-artifact
+          files: |
+            ./artifacts/*/*
