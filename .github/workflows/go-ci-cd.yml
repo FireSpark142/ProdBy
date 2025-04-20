@@ -119,32 +119,35 @@ jobs:
           go build -v -trimpath -ldflags="-s -w" -o "dist/$BINARY_NAME" .
           echo "Built: dist/$BINARY_NAME"
 
+      # --- CORRECTED ARCHIVE STEP ---
       - name: Create Archive (${{ matrix.name }})
-        id: archive # Give this step an ID
-        shell: bash # Use bash for consistency across runners for this step
+        id: archive
+        shell: bash # Use bash for consistency
         run: |
           ARTIFACT_NAME="git-monitor-${{ github.ref_name }}-${{ matrix.name }}"
           ARCHIVE_PATH="" # Initialize variable
-          cd dist # Go into the directory where the binary is
-          ls -la # List files to be archived (for debugging)
-          if [[ "${{ matrix.goos }}" == "windows" ]]; then
-            7z a "../${ARTIFACT_NAME}.zip" * # Use 7z (pre-installed) for zip
-            ARCHIVE_PATH="../${ARTIFACT_NAME}.zip"
-            echo "Created ${ARCHIVE_PATH}"
-          else
-            # Handle case where '*' might match nothing if build failed
-            if [ -n "$(ls -A)" ]; then
-              tar czvf "../${ARTIFACT_NAME}.tar.gz" * # Use tar for .tar.gz
-              ARCHIVE_PATH="../${ARTIFACT_NAME}.tar.gz"
+          # Check if dist directory exists and has content before archiving
+          if [ -d "dist" ] && [ -n "$(ls -A dist)" ]; then
+            echo "Archiving contents of dist/ for ${{ matrix.name }}"
+            if [[ "${{ matrix.goos }}" == "windows" ]]; then
+              # Create archive in the current directory (workspace root) containing files from ./dist/
+              7z a "${ARTIFACT_NAME}.zip" "./dist/*"
+              ARCHIVE_PATH="${ARTIFACT_NAME}.zip" # Path relative to workspace root
               echo "Created ${ARCHIVE_PATH}"
             else
-              echo "::warning::No files found in dist/ to archive for ${{ matrix.name }}."
-              ARCHIVE_PATH="" # Set empty path explicitly
+              # Create archive in the current directory (workspace root) containing files from ./dist/
+              # Use -C flag for tar to change directory only for the operation
+              tar czvf "${ARTIFACT_NAME}.tar.gz" -C dist . # The '.' means all files relative to '-C dist'
+              ARCHIVE_PATH="${ARTIFACT_NAME}.tar.gz" # Path relative to workspace root
+              echo "Created ${ARCHIVE_PATH}"
             fi
+          else
+            echo "::warning::Directory dist/ is empty or does not exist. Skipping archive creation for ${{ matrix.name }}."
+            ARCHIVE_PATH=""
           fi
-          cd .. # Go back to the root
-          # Set output for artifact upload step
+          # Set output for artifact upload step (path is now relative to workspace root)
           echo "archive_path=${ARCHIVE_PATH}" >> $GITHUB_OUTPUT
+      # --- END CORRECTED ARCHIVE STEP ---
 
       - name: Upload build artifact (${{ matrix.name }})
         # Only run if archive_path is not empty
@@ -152,6 +155,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: git-monitor-binaries-${{ matrix.name }} # Unique artifact name per build
+          # Path is now directly the archive name in the workspace root
           path: ${{ steps.archive.outputs.archive_path }}
           retention-days: 5 # Keep artifacts for 5 days
 
